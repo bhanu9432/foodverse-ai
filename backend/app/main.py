@@ -25,7 +25,7 @@ for r in (food, freshness, hygiene, cooking, planner, audio, insights):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ai_configured": llm.configured(), "model": config.MODEL, "server_audio": audio.available()}
+    return {"ok": True, "ai_configured": llm.configured(), "model": llm.active_model(), "server_audio": audio.available()}
 
 
 # If the React app has been built (npm run build), serve it from the same server.

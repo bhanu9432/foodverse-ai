@@ -19,6 +19,9 @@ _load_dotenv()
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 MODEL = os.getenv("FOODVERSE_MODEL", "claude-sonnet-5-5")
+# Free alternative: a Google AI Studio key. Used only when ANTHROPIC_API_KEY is empty.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 DB_PATH = os.getenv("FOODVERSE_DB", "foodverse.db")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "tiny")
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",") if o.strip()]

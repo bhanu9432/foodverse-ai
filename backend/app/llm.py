@@ -1,6 +1,8 @@
 """Thin wrapper around the Claude API: vision + reasoning, always returning validated JSON."""
 import json
 import re
+import urllib.error
+import urllib.request
 
 from fastapi import HTTPException
 
@@ -15,7 +17,7 @@ def client():
     if _client is None:
         if not config.ANTHROPIC_API_KEY:
             raise HTTPException(
-                503, "ANTHROPIC_API_KEY is not set. Add it to backend/.env and restart the server."
+                503, "ANTHROPIC_API_KEY is not set (or set GEMINI_API_KEY for the free option). Add it to the server settings and restart."
             )
         import anthropic
 
@@ -23,8 +25,21 @@ def client():
     return _client
 
 
+def provider() -> str:
+    """Claude if its key is set, otherwise Gemini if its key is set."""
+    if config.ANTHROPIC_API_KEY:
+        return "claude"
+    if config.GEMINI_API_KEY:
+        return "gemini"
+    return "none"
+
+
 def configured() -> bool:
-    return bool(config.ANTHROPIC_API_KEY)
+    return provider() != "none"
+
+
+def active_model() -> str:
+    return config.GEMINI_MODEL if provider() == "gemini" else config.MODEL
 
 
 def image_block(b64: str) -> dict:
@@ -67,9 +82,55 @@ def _extract_json(text: str):
     raise ValueError("unterminated JSON")
 
 
+def _gemini_parts(content) -> list[dict]:
+    """Convert our Claude-style content (string or list of blocks) into Gemini parts."""
+    if isinstance(content, str):
+        return [{"text": content or " "}]
+    parts = []
+    for b in content:
+        if b.get("type") == "image":
+            src = b["source"]
+            parts.append({"inline_data": {"mime_type": src["media_type"], "data": src["data"]}})
+        else:
+            parts.append({"text": b.get("text", "") or " "})
+    return parts
+
+
+def _gemini_complete(system: str, msgs: list[dict], max_tokens: int) -> str:
+    contents = [
+        {"role": "model" if m["role"] == "assistant" else "user", "parts": _gemini_parts(m["content"])} for m in msgs
+    ]
+    body = {
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": contents,
+        # thinkingBudget 0: otherwise hidden "thinking" tokens can eat the output budget and cut the JSON short.
+        "generationConfig": {"maxOutputTokens": max_tokens, "thinkingConfig": {"thinkingBudget": 0}},
+    }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{config.GEMINI_MODEL}:generateContent"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "x-goog-api-key": config.GEMINI_API_KEY},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=90) as r:
+            data = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            raise HTTPException(429, "The free Gemini limit was reached. Wait a minute and try again.")
+        raise HTTPException(502, f"The AI service returned an error ({e.code}). Check GEMINI_API_KEY and try again.")
+    except Exception as e:
+        raise HTTPException(502, f"The AI service could not be reached: {type(e).__name__}.")
+    cands = data.get("candidates") or []
+    parts = (cands[0].get("content") or {}).get("parts", []) if cands else []
+    return "".join(p.get("text", "") for p in parts)
+
+
 def complete(system: str, content: list[dict] | str, max_tokens: int = 2048, messages: list[dict] | None = None) -> str:
     """One model call. `content` is the user turn; pass `messages` for multi-turn chat."""
     msgs = messages if messages is not None else [{"role": "user", "content": content}]
+    if provider() == "gemini":
+        return _gemini_complete(system, msgs, max_tokens)
     try:
         resp = client().messages.create(model=config.MODEL, max_tokens=max_tokens, system=system, messages=msgs)
     except HTTPException:
