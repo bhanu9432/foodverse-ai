@@ -1,0 +1,12 @@
+# One-click deploy on Render: New > Blueprint > pick this repo.
+services:
+  - type: web
+    name: foodverse-ai
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false          # you paste the key in the Render dashboard
+      - key: FOODVERSE_MODEL
+        value: claude-sonnet-5-5
