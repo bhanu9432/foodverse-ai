@@ -20,6 +20,10 @@ _load_dotenv()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 MODEL = os.getenv("FOODVERSE_MODEL", "claude-sonnet-5-5")
 # Free alternative: a Google AI Studio key. Used only when ANTHROPIC_API_KEY is empty.
+# Free option 1: OpenRouter key (openrouter.ai). Used when ANTHROPIC_API_KEY is empty.
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")  # the free router picks a free model that fits each request
+# Free option 2: Google AI Studio key.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 DB_PATH = os.getenv("FOODVERSE_DB", "foodverse.db")

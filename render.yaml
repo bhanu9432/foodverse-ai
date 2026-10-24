@@ -8,6 +8,8 @@ services:
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false          # optional: paste in the Render dashboard
+      - key: OPENROUTER_API_KEY
+        sync: false          # free option: key from openrouter.ai
       - key: GEMINI_API_KEY
         sync: false          # free option: key from aistudio.google.com
       - key: FOODVERSE_MODEL

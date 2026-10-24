@@ -58,7 +58,7 @@ export default function App() {
           )}
           {!caps.offline && !caps.ai_configured && (
             <p className="banner warn">
-              No AI key is set on the server. Add ANTHROPIC_API_KEY or the free GEMINI_API_KEY to enable analysis.
+              No AI key is set on the server. Add ANTHROPIC_API_KEY, or a free OPENROUTER_API_KEY / GEMINI_API_KEY, to enable analysis.
             </p>
           )}
           <Page go={go} />

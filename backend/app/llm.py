@@ -1,6 +1,8 @@
 """Thin wrapper around the Claude API: vision + reasoning, always returning validated JSON."""
 import json
+import logging
 import re
+import time
 import urllib.error
 import urllib.request
 
@@ -9,6 +11,7 @@ from fastapi import HTTPException
 from . import config
 
 _client = None
+log = logging.getLogger("foodverse.llm")
 
 
 def client():
@@ -17,7 +20,7 @@ def client():
     if _client is None:
         if not config.ANTHROPIC_API_KEY:
             raise HTTPException(
-                503, "ANTHROPIC_API_KEY is not set (or set GEMINI_API_KEY for the free option). Add it to the server settings and restart."
+                503, "ANTHROPIC_API_KEY is not set (or set OPENROUTER_API_KEY / GEMINI_API_KEY for a free option). Add it to the server settings and restart."
             )
         import anthropic
 
@@ -29,6 +32,8 @@ def provider() -> str:
     """Claude if its key is set, otherwise Gemini if its key is set."""
     if config.ANTHROPIC_API_KEY:
         return "claude"
+    if config.OPENROUTER_API_KEY:
+        return "openrouter"
     if config.GEMINI_API_KEY:
         return "gemini"
     return "none"
@@ -39,7 +44,7 @@ def configured() -> bool:
 
 
 def active_model() -> str:
-    return config.GEMINI_MODEL if provider() == "gemini" else config.MODEL
+    return {"gemini": config.GEMINI_MODEL, "openrouter": config.OPENROUTER_MODEL}.get(provider(), config.MODEL)
 
 
 def image_block(b64: str) -> dict:
@@ -112,23 +117,116 @@ def _gemini_complete(system: str, msgs: list[dict], max_tokens: int) -> str:
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "x-goog-api-key": config.GEMINI_API_KEY},
     )
-    try:
-        with urllib.request.urlopen(req, timeout=90) as r:
-            data = json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        if e.code == 429:
-            raise HTTPException(429, "The free Gemini limit was reached. Wait a minute and try again.")
-        raise HTTPException(502, f"The AI service returned an error ({e.code}). Check GEMINI_API_KEY and try again.")
-    except Exception as e:
-        raise HTTPException(502, f"The AI service could not be reached: {type(e).__name__}.")
+    data = None
+    thinking_off = True
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req, timeout=90) as r:
+                data = json.loads(r.read())
+            break
+        except urllib.error.HTTPError as e:
+            try:
+                reason = json.loads(e.read()).get("error", {}).get("message", "")
+            except Exception:
+                reason = ""
+            log.error("Gemini HTTP %s: %s", e.code, reason[:500])
+            # Some models reject thinkingConfig: drop it and retry once.
+            if e.code == 400 and thinking_off and "thinking" in reason.lower():
+                thinking_off = False
+                body["generationConfig"].pop("thinkingConfig", None)
+                req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=req.headers)
+                continue
+            # 429 = rate limit, 5xx = Google is busy: wait and try again a few times before giving up.
+            if e.code in (429, 500, 503, 504) and attempt < 4:
+                time.sleep(2 * (attempt + 1))
+                continue
+            if e.code == 429:
+                raise HTTPException(429, "The free Gemini limit was reached. Wait a minute and try again.")
+            if e.code in (500, 503, 504):
+                raise HTTPException(503, "Gemini is busy right now. Please try again in a minute.")
+            raise HTTPException(502, f"Gemini error {e.code}: {reason[:160] or 'check GEMINI_API_KEY and GEMINI_MODEL'}")
+        except Exception as e:
+            log.error("Gemini request failed: %s", e)
+            raise HTTPException(502, f"The AI service could not be reached: {type(e).__name__}.")
+    if data is None:
+        raise HTTPException(503, "Gemini is busy right now. Please try again in a minute.")
     cands = data.get("candidates") or []
     parts = (cands[0].get("content") or {}).get("parts", []) if cands else []
     return "".join(p.get("text", "") for p in parts)
 
 
+def _openrouter_content(content):
+    if isinstance(content, str):
+        return content or " "
+    parts = []
+    for b in content:
+        if b.get("type") == "image":
+            src = b["source"]
+            parts.append({"type": "image_url", "image_url": {"url": f"data:{src['media_type']};base64,{src['data']}"}})
+        else:
+            parts.append({"type": "text", "text": b.get("text", "") or " "})
+    return parts
+
+
+def _openrouter_complete(system: str, msgs: list[dict], max_tokens: int) -> str:
+    body = {
+        "model": config.OPENROUTER_MODEL,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "system", "content": system}]
+        + [{"role": m["role"], "content": _openrouter_content(m["content"])} for m in msgs],
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+        "X-Title": "FoodVerse AI",
+    }
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/chat/completions", data=json.dumps(body).encode(), headers=headers
+    )
+    data = None
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=90) as r:
+                data = json.loads(r.read())
+            if data.get("error"):  # OpenRouter can answer 200 with an error object
+                raise ValueError(str(data["error"])[:200])
+            break
+        except urllib.error.HTTPError as e:
+            try:
+                reason = json.loads(e.read()).get("error", {}).get("message", "")
+            except Exception:
+                reason = ""
+            log.error("OpenRouter HTTP %s: %s", e.code, reason[:500])
+            if e.code in (429, 500, 502, 503, 504) and attempt < 3:
+                time.sleep(2 * (attempt + 1))
+                continue
+            if e.code == 429:
+                raise HTTPException(429, "The free AI limit was reached. Wait a minute and try again.")
+            if e.code in (500, 502, 503, 504):
+                raise HTTPException(503, "The free AI model is busy right now. Please try again in a minute.")
+            raise HTTPException(502, f"OpenRouter error {e.code}: {reason[:160] or 'check OPENROUTER_API_KEY and OPENROUTER_MODEL'}")
+        except ValueError as e:
+            log.error("OpenRouter returned an error: %s", e)
+            if attempt < 3:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise HTTPException(503, "The free AI model is busy right now. Please try again in a minute.")
+        except Exception as e:
+            log.error("OpenRouter request failed: %s", e)
+            raise HTTPException(502, f"The AI service could not be reached: {type(e).__name__}.")
+    choices = (data or {}).get("choices") or []
+    msg = (choices[0].get("message") or {}) if choices else {}
+    out = msg.get("content") or ""
+    if isinstance(out, list):
+        out = "".join(p.get("text", "") for p in out if isinstance(p, dict))
+    return out
+
+
 def complete(system: str, content: list[dict] | str, max_tokens: int = 2048, messages: list[dict] | None = None) -> str:
     """One model call. `content` is the user turn; pass `messages` for multi-turn chat."""
     msgs = messages if messages is not None else [{"role": "user", "content": content}]
+    if provider() == "openrouter":
+        return _openrouter_complete(system, msgs, max_tokens)
     if provider() == "gemini":
         return _gemini_complete(system, msgs, max_tokens)
     try:
